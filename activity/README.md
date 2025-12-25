@@ -47,15 +47,17 @@ This project uses:
 - `?instance_id=...` as the multiplayer room id
 - WebSockets on the same origin: `/ws?instance_id=...`
 
-To setup the discord activity: 
-    1. Go to https://discord.com/developers/applications
-    2. Choose your Application
-    3. Go to "Activities - Settings": 
-        - Check "Enable Activities"
-        - Check "Supported Platforms" for Web, iOS, Android
-    4. Go to "Activities URL Mappings"
-        - prefix / ; target: wos-rally-sync.yourdomain.workers.dev
-    (5. Optional: Set cuustom Background/Coverart at "Activities - Art Assets")
+To setup the discord activity:
+
+1. Go to [https://discord.com/developers/applications](https://discord.com/developers/applications)
+2. Choose your Application
+3. Go to "Activities - Settings":
+   - Check "Enable Activities"
+   - Check "Supported Platforms" for Web, iOS, Android
+4. Go to "Activities URL Mappings":
+   - prefix `/` ; target: `wos-rally-sync.yourdomain.workers.dev`
+5. (Optional) Set custom Background/Coverart at "Activities - Art Assets"
+
 
 ### Important settings
 - Ensure your Activity is allowed to use WebSockets.
