@@ -10,6 +10,9 @@ const wsUrl = (() => {
   return `${proto}://${host}/ws?instance_id=${encodeURIComponent(roomId)}`;
 })();
 
+const SYNC_SAMPLE_COUNT = 6;
+const SYNC_INTERVAL_MS = 10000; // every 10 seconds
+
 function navigateToRoom(id) {
   const url = new URL(window.location.href);
   url.searchParams.set("instance_id", id);
@@ -220,6 +223,11 @@ export function RallyApp() {
   const [ws, setWs] = useState(null);
   const [state, setState] = useState({ players: [], rally: null });
   const [now, setNow] = useState(Date.now());
+  const [timeOffsetMs, setTimeOffsetMs] = useState(0);
+  const [lastSyncAt, setLastSyncAt] = useState(null);
+  const [bestRttMs, setBestRttMs] = useState(null);
+  const offsetRef = useRef(0);
+  const syncSamplesRef = useRef([]);  
 
   // Player input
   const [name, setName] = useState("");
@@ -266,19 +274,80 @@ export function RallyApp() {
     });
   }
 
+  function setOffsetSample(offsetMs, rttMs, atTs) {
+    const samples = syncSamplesRef.current.slice(-SYNC_SAMPLE_COUNT + 1);
+    samples.push({ offsetMs, rttMs, atTs });
+    const best = samples.reduce((min, next) => (next.rttMs < min.rttMs ? next : min), samples[0]);
+    syncSamplesRef.current = samples;
+    if (best) {
+      offsetRef.current = best.offsetMs;
+      setTimeOffsetMs(best.offsetMs);
+      setBestRttMs(best.rttMs);
+      setLastSyncAt(atTs);
+    }
+  }
+
+  function handleTimeSyncResponse(payload) {
+    if (!payload) return;
+    const { t0, t1, t2 } = payload;
+    if (![t0, t1, t2].every((v) => Number.isFinite(v))) return;
+    const t3 = Date.now();
+    const rtt = Math.max(0, (t3 - t0) - (t2 - t1));
+    const offset = ((t1 - t0) + (t2 - t3)) / 2;
+    setOffsetSample(offset, rtt, t3);
+  }
+
+  function requestTimeSync(socket) {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify({ type: "TIME_SYNC_REQUEST", roomId, payload: { t0: Date.now() } }));
+  }
+
+  function runSyncBurst(socket) {
+    for (let i = 0; i < SYNC_SAMPLE_COUNT; i += 1) {
+      setTimeout(() => requestTimeSync(socket), i * 250);
+    }
+  }
+
   useEffect(() => {
     const socket = new WebSocket(wsUrl);
-    socket.onopen = () => {
-      socket.send(JSON.stringify({ type: "STATE_REQUEST", roomId }));
+    let syncInterval = null;
+
+    const handleOpen = () => {socket.send(JSON.stringify({ type: "STATE_REQUEST", roomId }));
+      runSyncBurst(socket);
+      syncInterval = window.setInterval(() => runSyncBurst(socket), SYNC_INTERVAL_MS);
     };
-    socket.onmessage = (e) => setState(JSON.parse(e.data).payload);
-    socket.onerror = () => {};
+
+    const handleMessage = (e) => {
+      let msg;
+      try {
+        msg = JSON.parse(e.data);
+      } catch {
+        return;
+      }
+      if (msg?.type === "STATE") {
+        setState(msg.payload);
+        return;
+      }
+      if (msg?.type === "TIME_SYNC_RESPONSE") {
+        handleTimeSyncResponse(msg.payload);
+      }
+  };
+
+    socket.addEventListener("open", handleOpen);
+    socket.addEventListener("message", handleMessage);
+    socket.addEventListener("error", () => {});
     setWs(socket);
-    return () => socket.close();
+
+    return () => {
+      if (syncInterval) window.clearInterval(syncInterval);
+      socket.removeEventListener("open", handleOpen);
+      socket.removeEventListener("message", handleMessage);
+      socket.close();
+    };
   }, []);
 
   useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 200);
+    const t = setInterval(() => setNow(Date.now() + offsetRef.current), 200);
     return () => clearInterval(t);
   }, []);
 
@@ -322,18 +391,14 @@ export function RallyApp() {
   function sendRallyStart() {
     if (!canStartRally) return;
 
-    const nowTs = Date.now();
     const rallyDurationMs = delay * 60 * 1000;
     const preDelayMs = Math.max(0, preDelaySec) * 1000;
-
-    // Time when MARCH starts
-    const launchAt = nowTs + preDelayMs + rallyDurationMs;
 
     ws.send(
       JSON.stringify({
         roomId,
         type: "RALLY_START",
-        payload: { starterId, launchAt },
+        payload: { starterId, rallyDurationMs, preDelayMs },
       })
     );
   }
@@ -403,6 +468,9 @@ export function RallyApp() {
 
   // Hybrid scheduler: only local-selected players, local volumes
   const effectiveOnlySelected = selectedIds.length > 0;
+  const syncFreshMs = 60000;
+  const isSynced = lastSyncAt && Date.now() - lastSyncAt < syncFreshMs;
+  const syncLabel = isSynced ? "Synced" : "Syncing";
 
   useEffect(() => {
     if (!ttsEnabled) return;
@@ -480,10 +548,9 @@ export function RallyApp() {
             Time is shown in UTC
           </div>
         </div>
-        <div className="chip">
-          {/* TODO: Maybe add something like a heartbeat and auto adjust marchtimes */}
+        <div className={`chip ${isSynced ? "ok" : "warn"}`} title={`Clock offset: ${Math.round(timeOffsetMs)} ms, RTT: ${bestRttMs ?? "?"} ms`}>
           <span className="dot" />
-          Live
+          Live. {syncLabel}
         </div>
       </header>
 
@@ -1054,6 +1121,12 @@ const css = `
     background:linear-gradient(180deg, rgba(77,255,167,1), rgba(0,184,92,1));
     box-shadow:0 0 0 4px rgba(0,184,92,.18);
   }
+
+  .chip.warn .dot{
+    background:linear-gradient(180deg, rgba(255,210,77,1), rgba(235,165,0,1));
+    box-shadow:0 0 0 4px rgba(255,210,77,.18);
+  }
+
   .grid{
     display:grid;
     grid-template-columns: 1fr 1fr;

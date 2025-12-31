@@ -20,11 +20,13 @@ type ClientMsg =
   | { type: "STATE_REQUEST"; roomId?: string }
   | { type: "PLAYER_ADD"; roomId?: string; payload: Player }
   | { type: "PLAYER_REMOVE"; roomId?: string; payload: string }
-  | { type: "RALLY_START"; roomId?: string; payload: { starterId: string; launchAt: number };}
-  | { type: "RALLY_END"; roomId?: string };
+  | { type: "RALLY_START"; roomId?: string; payload: { starterId: string; launchAt?: number; rallyDurationMs?: number; preDelayMs?: number }; }
+  | { type: "RALLY_END"; roomId?: string }
+  | { type: "TIME_SYNC_REQUEST"; roomId?: string; payload: { t0: number } };
 
 
 type ServerMsg = { type: "STATE"; payload: RoomState };
+type TimeSyncResponse = { type: "TIME_SYNC_RESPONSE"; payload: { t0: number; t1: number; t2: number } };
 
 const DEFAULT_STATE: RoomState = { players: [], rally: null, lastActiveAt: Date.now() };
 
@@ -128,11 +130,20 @@ export class RallyRoom {
         return;
       }
       case "RALLY_START": {
-        const { starterId, launchAt } = msg.payload ?? {};
+        const { starterId, launchAt, rallyDurationMs, preDelayMs } = msg.payload ?? {};
 
         if (!starterId) return;
-        if (typeof launchAt !== "number" || !Number.isFinite(launchAt)) return;
-        this.data.rally = { starterId, launchAt };
+        let computedLaunchAt = launchAt;
+
+        if (typeof computedLaunchAt !== "number" || !Number.isFinite(computedLaunchAt)) {
+          const durationMs = Number(rallyDurationMs);
+          const delayMs = Number(preDelayMs ?? 0);
+          if (!Number.isFinite(durationMs) || durationMs < 0) return;
+          if (!Number.isFinite(delayMs) || delayMs < 0) return;
+          computedLaunchAt = Date.now() + delayMs + durationMs;
+        }
+
+        this.data.rally = { starterId, launchAt: computedLaunchAt };
 
         await this.persist();
         this.broadcast();
@@ -142,6 +153,15 @@ export class RallyRoom {
         this.data.rally = null;
         await this.persist();
         this.broadcast();
+        return;
+      }
+      case "TIME_SYNC_REQUEST": {
+        const t0 = msg.payload?.t0;
+        if (typeof t0 !== "number" || !Number.isFinite(t0)) return;
+        const t1 = Date.now();
+        const t2 = Date.now();
+        const reply: TimeSyncResponse = { type: "TIME_SYNC_RESPONSE", payload: { t0, t1, t2 } };
+        ws.send(JSON.stringify(reply));
         return;
       }
     }
